@@ -3,54 +3,12 @@ import './App.css'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 const LOW_CONFIDENCE = 70
-
-const views = [
-  ['dashboard', '总览'],
-  ['reports', '报告管理'],
-  ['review', '结果复核'],
-  ['compare', '指标对比'],
-  ['export', '导出中心'],
-]
-
-const statusLabels = {
-  queued: '已排队',
-  running: '运行中',
-  succeeded: '已完成',
-  failed: '失败',
-  skipped: '已跳过',
-  pending: '待复核',
-  approved: '已确认',
-  rejected: '已驳回',
-  edited: '已修改',
-}
-
-function statusClass(status) {
-  if (['succeeded', 'approved'].includes(status)) return 'verified'
-  if (['failed', 'skipped', 'rejected'].includes(status)) return 'rejected'
-  return 'review'
-}
-
-function StatusIcon({ status }) {
-  if (['failed', 'skipped'].includes(status)) return <span className="status-icon error">×</span>
-  if (status === 'succeeded') return <span className="status-icon success">✓</span>
-  if (['running', 'queued'].includes(status)) return <span className="status-icon running">!</span>
-  return null
-}
-
-function Badge({ status, children }) {
-  return (
-    <span className={`badge ${statusClass(status)}`}>
-      <StatusIcon status={status} />
-      {children || statusLabels[status] || status || '-'}
-    </span>
-  )
-}
+const views = [['dashboard', '总览'], ['reports', '报告管理'], ['review', '结果复核'], ['compare', '指标对比'], ['export', '导出中心']]
+const statusLabels = { queued: '已排队', running: '运行中', succeeded: '已完成', failed: '失败', skipped: '已跳过', pending: '待复核', approved: '已确认', rejected: '已驳回', edited: '已修改' }
 
 async function api(path, options) {
   const response = await fetch(`${API_BASE}${path}`, options)
-  if (!response.ok) {
-    throw new Error((await response.text()) || `HTTP ${response.status}`)
-  }
+  if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`)
   return response.json()
 }
 
@@ -60,25 +18,31 @@ function fileName(job) {
 
 function fmtDate(value) {
   if (!value) return '-'
-  try {
-    return new Date(value).toLocaleString('zh-CN', { hour12: false })
-  } catch {
-    return value
-  }
+  try { return new Date(value).toLocaleString('zh-CN', { hour12: false }) } catch { return value }
 }
 
 function translateReason(reason) {
   const text = String(reason || '')
-  if (text.includes('legacy social responsibility report') || text.includes('lacks ESG')) {
-    return '文档标题为传统社会责任报告，且缺少 ESG 或“环境、社会与治理”标题信号，不满足 60 字段 ESG 抽取流程要求，已跳过。'
-  }
-  if (text.includes('supporting statement') || text.includes('assurance report')) {
-    return '文档疑似为鉴证声明、补充说明或摘要文件，不是完整 ESG 报告，已跳过 60 字段抽取流程。'
-  }
-  if (text.includes('PDF cannot be opened or parsed')) {
-    return text.replace('PDF cannot be opened or parsed', 'PDF 无法打开或解析')
-  }
+  if (text.includes('legacy social responsibility report') || text.includes('lacks ESG')) return '文档标题为传统社会责任报告，且缺少 ESG 或“环境、社会与治理”标题信号，不满足 60 字段 ESG 抽取流程要求，已跳过。'
+  if (text.includes('supporting statement') || text.includes('assurance report')) return '文档疑似为鉴证声明、补充说明或摘要文件，不是完整 ESG 报告，已跳过 60 字段抽取流程。'
+  if (text.includes('PDF cannot be opened or parsed')) return text.replace('PDF cannot be opened or parsed', 'PDF 无法打开或解析')
   return text
+}
+
+function formatApiError(error) {
+  const text = String(error?.message || error || '')
+  try {
+    const data = JSON.parse(text)
+    const detail = data.detail
+    if (detail?.code === 'duplicate_report') {
+      return `${detail.message} 原任务：${detail.job_id?.slice(0, 10) || '-'}，状态：${statusLabels[detail.status] || detail.status || '-'}。`
+    }
+    if (typeof detail === 'string') return detail
+    if (detail?.message) return detail.message
+  } catch {
+    // Keep original text below.
+  }
+  return translateReason(text) || text
 }
 
 function confidence(row) {
@@ -97,13 +61,31 @@ function displayValue(row) {
   return [value, unit].filter(Boolean).join(' ') || row.summary || (row.matched ? '已匹配，待复核' : '未披露')
 }
 
-function App() {
+function statusClass(status) {
+  if (['succeeded', 'approved'].includes(status)) return 'verified'
+  if (['failed', 'skipped', 'rejected'].includes(status)) return 'rejected'
+  return 'review'
+}
+
+function StatusIcon({ status }) {
+  if (['failed', 'skipped'].includes(status)) return <span className="status-icon error">×</span>
+  if (status === 'succeeded') return <span className="status-icon success">✓</span>
+  if (['running', 'queued'].includes(status)) return <span className="status-icon running">!</span>
+  return null
+}
+
+function Badge({ status, children }) {
+  return <span className={`badge ${statusClass(status)}`}><StatusIcon status={status} />{children || statusLabels[status] || status || '-'}</span>
+}
+
+export default function App() {
   const [view, setView] = useState('dashboard')
   const [jobs, setJobs] = useState([])
   const [selectedJobId, setSelectedJobId] = useState('')
   const [results, setResults] = useState([])
   const [selectedField, setSelectedField] = useState('')
-  const [filter, setFilter] = useState('all')
+  const [resultFilter, setResultFilter] = useState('all')
+  const [jobFilter, setJobFilter] = useState('all')
   const [search, setSearch] = useState('')
   const [message, setMessage] = useState('上传 ESG 报告 PDF 后，系统会保留历史任务，并支持逐份报告复核和多公司指标对比。')
 
@@ -122,7 +104,8 @@ function App() {
       const rows = await api(`/jobs/${jobId}/results`)
       setResults(rows || [])
       setSelectedField(rows?.[0]?.field_key || '')
-    } catch (error) {
+      setResultFilter('all')
+    } catch {
       setResults([])
       setSelectedField('')
       const job = jobs.find((item) => item.job_id === jobId)
@@ -130,14 +113,15 @@ function App() {
     }
   }
 
-  useEffect(() => {
-    refreshJobs().catch((error) => setMessage(`读取历史任务失败：${error.message}`))
-  }, [])
+  async function openJob(job, nextView = 'review') {
+    setSelectedJobId(job.job_id)
+    setView(nextView)
+    setMessage(`正在查看：${fileName(job)}`)
+    await loadResults(job.job_id)
+  }
 
-  useEffect(() => {
-    if (selectedJobId) loadResults(selectedJobId)
-  }, [selectedJobId])
-
+  useEffect(() => { refreshJobs().catch((error) => setMessage(`读取历史任务失败：${error.message}`)) }, [])
+  useEffect(() => { if (selectedJobId) loadResults(selectedJobId) }, [selectedJobId])
   useEffect(() => {
     const timer = setInterval(() => refreshJobs().catch(() => {}), 4000)
     return () => clearInterval(timer)
@@ -156,7 +140,7 @@ function App() {
       setView('reports')
       setMessage(`已创建 ${data.jobs?.length || 0} 个任务。每份报告会单独保留、单独复核。`)
     } catch (error) {
-      setMessage(`上传失败：${error.message}`)
+      setMessage(`上传失败：${formatApiError(error)}`)
     }
   }
 
@@ -167,6 +151,23 @@ function App() {
       await refreshJobs()
     } catch (error) {
       setMessage(`重跑失败：${error.message}`)
+    }
+  }
+
+  async function deleteJob(jobId) {
+    const job = jobs.find((item) => item.job_id === jobId)
+    if (!window.confirm(`确定删除这份报告及其抽取结果吗？\n${fileName(job)}`)) return
+    try {
+      await api(`/jobs/${jobId}`, { method: 'DELETE' })
+      setMessage('报告任务已删除。')
+      if (selectedJobId === jobId) {
+        setSelectedJobId('')
+        setResults([])
+        setSelectedField('')
+      }
+      await refreshJobs()
+    } catch (error) {
+      setMessage(`删除失败：${formatApiError(error)}`)
     }
   }
 
@@ -193,7 +194,7 @@ function App() {
       const next = pending.find((item) => fresh.findIndex((rowItem) => rowItem.field_key === item.field_key) > currentIndex) || pending[0]
       if (next) {
         setSelectedField(next.field_key)
-        setFilter('pending')
+        setResultFilter('pending')
         setMessage('已保存复核结果，自动切换到下一条待复核记录。')
       } else {
         setMessage('已保存复核结果，当前报告没有更多待复核记录。')
@@ -211,35 +212,41 @@ function App() {
     return { total: jobs.length, done, failed, pending, avg }
   }, [jobs, results])
 
-  const visibleResults = useMemo(() => {
-    return results.filter((row) => {
-      const haystack = `${row.category} ${row.name_cn} ${row.field_key} ${row.evidence} ${displayValue(row)}`.toLowerCase()
-      const status = reviewStatus(row)
-      return haystack.includes(search.toLowerCase()) && (filter === 'all' || status === filter || (filter === 'low' && confidence(row) < LOW_CONFIDENCE))
-    })
-  }, [results, search, filter])
+  const visibleResults = useMemo(() => results.filter((row) => {
+    const haystack = `${row.category} ${row.name_cn} ${row.field_key} ${row.evidence} ${displayValue(row)}`.toLowerCase()
+    const status = reviewStatus(row)
+    return haystack.includes(search.toLowerCase()) && (resultFilter === 'all' || status === resultFilter || (resultFilter === 'low' && confidence(row) < LOW_CONFIDENCE))
+  }), [results, search, resultFilter])
 
   const selectedRow = results.find((row) => row.field_key === selectedField) || visibleResults[0]
 
-  return (
-    <div className="shell">
-      <Topbar view={view} setView={setView} search={search} setSearch={setSearch} />
-      <div className="workspace">
-        <Sidebar view={view} setView={setView} />
-        <main className="main">
-          <Header view={view} message={message} upload={upload} />
-          <div className="grid">
-            <Stats stats={stats} />
-            {view === 'dashboard' && <Dashboard jobs={jobs} setView={setView} setSelectedJobId={setSelectedJobId} />}
-            {view === 'reports' && <Reports jobs={jobs} selectedJobId={selectedJobId} setSelectedJobId={setSelectedJobId} retry={retry} />}
-            {view === 'review' && <Review selectedJob={selectedJob} results={visibleResults} selectedRow={selectedRow} setSelectedField={setSelectedField} filter={filter} setFilter={setFilter} saveReview={saveReview} />}
-            {view === 'compare' && <Compare jobs={jobs} selectedJob={selectedJob} results={results} />}
-            {view === 'export' && <Export jobs={jobs} />}
-          </div>
-        </main>
-      </div>
+  function goReports(filter) {
+    setJobFilter(filter)
+    setView('reports')
+  }
+
+  function goPendingReview() {
+    setResultFilter('pending')
+    setView('review')
+  }
+
+  return <div className="shell">
+    <Topbar view={view} setView={setView} search={search} setSearch={setSearch} />
+    <div className="workspace">
+      <Sidebar view={view} setView={setView} />
+      <main className="main">
+        <Header view={view} message={message} upload={upload} />
+        <div className="grid">
+          <Stats stats={stats} goReports={goReports} goPendingReview={goPendingReview} />
+          {view === 'dashboard' && <Dashboard jobs={jobs} openJob={openJob} />}
+          {view === 'reports' && <Reports jobs={jobs} jobFilter={jobFilter} setJobFilter={setJobFilter} selectedJobId={selectedJobId} openJob={openJob} retry={retry} deleteJob={deleteJob} />}
+          {view === 'review' && <Review selectedJob={selectedJob} rows={visibleResults} selectedRow={selectedRow} setSelectedField={setSelectedField} filter={resultFilter} setFilter={setResultFilter} saveReview={saveReview} onBack={() => setView('reports')} />}
+          {view === 'compare' && <Compare selectedJob={selectedJob} results={results} />}
+          {view === 'export' && <Export jobs={jobs} />}
+        </div>
+      </main>
     </div>
-  )
+  </div>
 }
 
 function Topbar({ view, setView, search, setSearch }) {
@@ -255,29 +262,41 @@ function Header({ view, message, upload }) {
   return <section className="page-header"><div><p className="eyebrow">ESG 报告智能抽取系统</p><h1>{title}</h1><p className="subtitle">{message}</p></div><div className="actions"><input id="fileInput" type="file" accept="application/pdf,.pdf" multiple hidden onChange={(event) => upload(event.target.files)} /><button className="button primary" onClick={() => document.getElementById('fileInput').click()}>上传多份报告</button></div></section>
 }
 
-function Stats({ stats }) {
-  return <section className="stats"><Stat title="历史报告任务" value={stats.total} note="保留所有上传记录" /><Stat title="已完成" value={stats.done} note="可复核 / 可导出" /><Stat title="失败或跳过" value={stats.failed} note="显示中文原因" warn /><Stat title="当前待复核" value={stats.pending} note={`平均置信度 ${stats.avg}%`} /></section>
+function Stats({ stats, goReports, goPendingReview }) {
+  return <section className="stats">
+    <Stat title="历史报告任务" value={stats.total} note="查看全部上传记录" onClick={() => goReports('all')} />
+    <Stat title="已完成" value={stats.done} note="打开可复核 / 可导出报告" onClick={() => goReports('succeeded')} />
+    <Stat title="失败或跳过" value={stats.failed} note="显示中文原因" warn onClick={() => goReports('failed')} />
+    <Stat title="当前待复核" value={stats.pending} note={`进入待复核，平均置信度 ${stats.avg}%`} onClick={goPendingReview} />
+  </section>
 }
 
-function Stat({ title, value, note, warn }) {
-  return <article className="card"><div className="stat-top"><span>{title}</span><span className={`badge ${warn ? 'rejected' : 'verified'}`}>{warn ? '注意' : '实时'}</span></div><div className="stat-value">{value}</div><span className={`trend ${warn ? 'warn' : ''}`}>{note}</span></article>
+function Stat({ title, value, note, warn, onClick }) {
+  return <article className="card"><div className="stat-top"><span>{title}</span><span className={`badge ${warn ? 'rejected' : 'verified'}`}>{warn ? '注意' : '实时'}</span></div><div className="stat-value">{value}</div><button className={`stat-link ${warn ? 'warn' : ''}`} onClick={onClick}>{note}</button></article>
 }
 
-function Dashboard({ jobs, setView, setSelectedJobId }) {
-  return <div className="panel"><div className="panel-header"><div><h2 className="panel-title">最近报告</h2><p className="panel-subtitle">点击任意报告可进入单报告复核。</p></div></div><JobTable jobs={jobs.slice(0, 8)} onSelect={(job) => { setSelectedJobId(job.job_id); setView('review') }} /></div>
+function Dashboard({ jobs, openJob }) {
+  return <div className="panel"><div className="panel-header"><div><h2 className="panel-title">最近报告</h2><p className="panel-subtitle">点击任意报告，直接进入该报告的抽取结果与复核界面。</p></div></div><JobTable jobs={jobs.slice(0, 8)} onOpen={openJob} /></div>
 }
 
-function Reports({ jobs, selectedJobId, setSelectedJobId, retry }) {
-  return <div className="panel"><div className="panel-header"><div><h2 className="panel-title">历史报告列表</h2><p className="panel-subtitle">每份上传报告都会保留任务、状态、结果和复核记录。</p></div></div><JobTable jobs={jobs} selectedJobId={selectedJobId} onSelect={(job) => setSelectedJobId(job.job_id)} retry={retry} /></div>
+function Reports({ jobs, jobFilter, setJobFilter, selectedJobId, openJob, retry, deleteJob }) {
+  const filtered = jobs.filter((job) => jobFilter === 'all' || (jobFilter === 'failed' ? ['failed', 'skipped'].includes(job.status) : job.status === jobFilter))
+  return <div className="panel"><div className="panel-header"><div><h2 className="panel-title">历史报告列表</h2><p className="panel-subtitle">点击报告名称或“查看结果”，直接进入该报告的提取结果复核。</p></div></div><div className="filters">{[['all', '全部'], ['succeeded', '已完成'], ['running', '运行中'], ['failed', '失败/跳过']].map(([id, label]) => <button key={id} className={`chip ${jobFilter === id ? 'active' : ''}`} onClick={() => setJobFilter(id)}>{label}</button>)}</div><JobTable jobs={filtered} selectedJobId={selectedJobId} onOpen={openJob} retry={retry} deleteJob={deleteJob} /></div>
 }
 
-function JobTable({ jobs, onSelect, selectedJobId, retry }) {
-  if (!jobs.length) return <div className="empty">暂无历史任务。请先上传 ESG PDF 报告。</div>
-  return <div className="table-wrap"><table><thead><tr><th>报告</th><th>状态</th><th>模式</th><th>更新时间</th><th>原因</th><th>操作</th></tr></thead><tbody>{jobs.map((job) => <tr key={job.job_id} className={selectedJobId === job.job_id ? 'selected' : ''} onClick={() => onSelect?.(job)}><td><div className="strong">{fileName(job)}</div><div className="muted">{job.job_id.slice(0, 10)}</div></td><td><Badge status={job.status} /></td><td>{job.mode}</td><td>{fmtDate(job.updated_at)}</td><td className="muted">{translateReason(job.error || job.summary?.reason) || '-'}</td><td>{retry && <button className="button" disabled={job.status === 'running'} onClick={(event) => { event.stopPropagation(); retry(job.job_id) }}>重跑</button>}</td></tr>)}</tbody></table></div>
+function JobTable({ jobs, selectedJobId, onOpen, retry, deleteJob }) {
+  if (!jobs.length) return <div className="empty">暂无符合条件的历史任务。</div>
+  return <div className="table-wrap"><table><thead><tr><th>报告</th><th>状态</th><th>模式</th><th>更新时间</th><th>原因</th><th>操作</th></tr></thead><tbody>{jobs.map((job) => <tr key={job.job_id} className={selectedJobId === job.job_id ? 'selected' : ''} onClick={() => onOpen(job)}><td><button className="table-link" onClick={(event) => { event.stopPropagation(); onOpen(job) }}><span className="strong">{fileName(job)}</span><span className="muted">{job.job_id.slice(0, 10)}</span></button></td><td><Badge status={job.status} /></td><td>{job.mode}</td><td>{fmtDate(job.updated_at)}</td><td><ReasonButton reason={job.error || job.summary?.reason} /></td><td><div className="actions"><button className="button" onClick={(event) => { event.stopPropagation(); onOpen(job) }}>查看结果</button>{retry && <button className="button" disabled={job.status === 'running'} onClick={(event) => { event.stopPropagation(); retry(job.job_id) }}>重跑</button>}{deleteJob && <button className="button danger" disabled={job.status === 'running'} onClick={(event) => { event.stopPropagation(); deleteJob(job.job_id) }}>删除</button>}</div></td></tr>)}</tbody></table></div>
 }
 
-function Review({ selectedJob, results, selectedRow, setSelectedField, filter, setFilter, saveReview }) {
-  return <section className="split"><div className="panel"><div className="panel-header"><div><h2 className="panel-title">单报告复核</h2><p className="panel-subtitle">{selectedJob ? fileName(selectedJob) : '请选择报告'}。确认/驳回后会自动跳到下一条待复核。</p></div></div><div className="filters">{[['all', '全部'], ['pending', '待复核'], ['approved', '已确认'], ['rejected', '已驳回'], ['low', '低置信度']].map(([id, label]) => <button key={id} className={`chip ${filter === id ? 'active' : ''}`} onClick={() => setFilter(id)}>{label}</button>)}</div><ResultTable rows={results} selectedRow={selectedRow} setSelectedField={setSelectedField} /></div><Evidence row={selectedRow} saveReview={saveReview} /></section>
+function ReasonButton({ reason }) {
+  const text = translateReason(reason)
+  if (!text) return <span className="muted">-</span>
+  return <button className="reason-link" title={text} onClick={(event) => { event.stopPropagation(); window.alert(text) }}>查看中文原因</button>
+}
+
+function Review({ selectedJob, rows, selectedRow, setSelectedField, filter, setFilter, saveReview, onBack }) {
+  return <section className="split"><div className="panel"><div className="panel-header"><div><h2 className="panel-title">单报告复核</h2><p className="panel-subtitle">{selectedJob ? fileName(selectedJob) : '请选择报告'}。确认/驳回后会自动跳到下一条待复核。</p></div><button className="button" onClick={onBack}>返回报告管理</button></div><div className="filters">{[['all', '全部'], ['pending', '待复核'], ['approved', '已确认'], ['rejected', '已驳回'], ['low', '低置信度']].map(([id, label]) => <button key={id} className={`chip ${filter === id ? 'active' : ''}`} onClick={() => setFilter(id)}>{label}</button>)}</div><ResultTable rows={rows} selectedRow={selectedRow} setSelectedField={setSelectedField} /></div><Evidence row={selectedRow} saveReview={saveReview} /></section>
 }
 
 function ResultTable({ rows, selectedRow, setSelectedField }) {
@@ -309,5 +328,3 @@ function Compare({ selectedJob, results }) {
 function Export({ jobs }) {
   return <div className="panel"><div className="panel-header"><div><h2 className="panel-title">导出中心</h2><p className="panel-subtitle">每份报告单独下载复核后的 CSV。</p></div></div><div className="table-wrap"><table><thead><tr><th>报告</th><th>状态</th><th>导出</th></tr></thead><tbody>{jobs.map((job) => <tr key={job.job_id}><td>{fileName(job)}</td><td><Badge status={job.status} /></td><td><button className="button" disabled={job.status !== 'succeeded'} onClick={() => window.open(`${API_BASE}/jobs/${job.job_id}/export.csv`, '_blank')}>下载 CSV</button></td></tr>)}</tbody></table></div></div>
 }
-
-export default App
