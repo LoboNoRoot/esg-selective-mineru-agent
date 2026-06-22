@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    container_name: esg-selective-mineru-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /app/src
+      MINERU_AUTO_RUN_ENABLED: "false"
+      MINERU_OUTPUT_ROOT: /app/output/mineru_cache
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./configs:/app/configs:ro
+    restart: unless-stopped

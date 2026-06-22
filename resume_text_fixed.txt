@@ -1,0 +1,49 @@
+---PAGE 1---
+
+
+(+86) 199-6963-5324
+ehongxv152@163.com
+65
+
+  2024.09-2027.06
+
+
+ESGAgent  2026.03 
+
+ESG31644Schema
+60
+ MinerUPyMuPDFPDFBBoxDocModel
+OCR
+ Agent
+VLM
+ FAISS
+42/6070%
+  2025.09-2025.11
+ PDF
+98%80%
+ PyMuPDF
+
+ WebPDF
+
+AI  2025.12 
+ miRNA
+ SVMmiRNA
+
+ 97%
+
+ 6
+ 2025
+ 2026
+
+ RAGAgentPrompt
+CodexCozeDify
+ PythonPythonPandasNumPyMatplotlib
+Seaborn
+ PyMuPDFMinerUPDFSeleniumBeautifulSoup
+
+ FastAPISQLitePostgreSQLHTML
+JavaScriptChart.js
+ 
+ CExcelVLOOKUP
+
+54
