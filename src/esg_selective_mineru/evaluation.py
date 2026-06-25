@@ -19,6 +19,14 @@ ANNOTATION_COLUMNS = [
     "annotator_note",
 ]
 
+RETRIEVAL_ANNOTATION_COLUMNS = [
+    "best_mode",
+    "simple_score",
+    "local_hybrid_score",
+    "embedding_hybrid_score",
+    "retrieval_note",
+]
+
 
 def _clean_space(text: Any) -> str:
     text = "" if text is None else str(text)
@@ -134,6 +142,146 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]], columns: List[str]) -> No
         writer.writeheader()
         for row in rows:
             writer.writerow({column: row.get(column, "") for column in columns})
+
+
+def _top_context(contexts: Dict[str, List[Dict[str, Any]]], field_key: str) -> Dict[str, Any]:
+    items = contexts.get(field_key) or []
+    return items[0] if items else {}
+
+
+def _context_short(item: Dict[str, Any], *, width: int = 260) -> str:
+    return _window(_clean_space(item.get("text", "")), 0, width=width)
+
+
+def _load_retrieval_annotations(path: Path) -> Dict[tuple[str, str], Dict[str, str]]:
+    if not path.exists():
+        return {}
+    with path.open("r", newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    return {
+        (row.get("report_id", ""), row.get("field_key", "")): row
+        for row in rows
+    }
+
+
+def build_retrieval_evaluation_pack(
+    simple_dirs: List[Path],
+    local_hybrid_dirs: List[Path],
+    embedding_hybrid_dirs: List[Path],
+    output_dir: Path,
+) -> Dict[str, str]:
+    if not (len(simple_dirs) == len(local_hybrid_dirs) == len(embedding_hybrid_dirs)):
+        raise ValueError("simple/local/embedding 目录数量必须一致，并按同一报告顺序传入。")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    table_path = output_dir / "retrieval_manual_comparison.csv"
+    existing = _load_retrieval_annotations(table_path)
+    rows: List[Dict[str, Any]] = []
+    report_rows: List[Dict[str, Any]] = []
+
+    for simple_dir, local_dir, embedding_dir in zip(simple_dirs, local_hybrid_dirs, embedding_hybrid_dirs):
+        simple_summary = _read_optional_json(simple_dir / "extraction_summary.json", {})
+        local_summary = _read_optional_json(local_dir / "extraction_summary.json", {})
+        embedding_summary = _read_optional_json(embedding_dir / "extraction_summary.json", {})
+        simple_contexts = _read_optional_json(simple_dir / "field_contexts.json", {})
+        local_contexts = _read_optional_json(local_dir / "field_contexts.json", {})
+        embedding_contexts = _read_optional_json(embedding_dir / "field_contexts.json", {})
+        report_id = _report_id(simple_dir, simple_summary)
+        field_keys = sorted(set(simple_contexts) | set(local_contexts) | set(embedding_contexts))
+        changed_top1 = 0
+        changed_embedding_vs_local = 0
+        vector_only = 0
+
+        for field_key in field_keys:
+            simple_top = _top_context(simple_contexts, field_key)
+            local_top = _top_context(local_contexts, field_key)
+            embedding_top = _top_context(embedding_contexts, field_key)
+            simple_id = simple_top.get("chunk_id", "")
+            local_id = local_top.get("chunk_id", "")
+            embedding_id = embedding_top.get("chunk_id", "")
+            if simple_id != embedding_id:
+                changed_top1 += 1
+            if local_id != embedding_id:
+                changed_embedding_vs_local += 1
+            if embedding_top.get("retrieval_source") == "vector":
+                vector_only += 1
+
+            row = {
+                "report_id": report_id,
+                "field_key": field_key,
+                "simple_dir": str(simple_dir),
+                "local_hybrid_dir": str(local_dir),
+                "embedding_hybrid_dir": str(embedding_dir),
+                "simple_top1_chunk": simple_id,
+                "simple_top1_page": simple_top.get("page", ""),
+                "simple_top1_score": simple_top.get("score", ""),
+                "simple_top1_text": _context_short(simple_top),
+                "local_top1_chunk": local_id,
+                "local_top1_page": local_top.get("page", ""),
+                "local_top1_score": local_top.get("score", ""),
+                "local_vector_rank": local_top.get("vector_rank", ""),
+                "local_top1_text": _context_short(local_top),
+                "embedding_top1_chunk": embedding_id,
+                "embedding_top1_page": embedding_top.get("page", ""),
+                "embedding_top1_score": embedding_top.get("score", ""),
+                "embedding_bm25_rank": embedding_top.get("bm25_rank", ""),
+                "embedding_vector_rank": embedding_top.get("vector_rank", ""),
+                "embedding_vector_score": embedding_top.get("vector_score", ""),
+                "embedding_vector_backend": embedding_top.get("vector_backend", embedding_summary.get("retriever_vector_backend_actual", "")),
+                "embedding_top1_text": _context_short(embedding_top),
+                "simple_vs_embedding_changed": int(simple_id != embedding_id),
+                "local_vs_embedding_changed": int(local_id != embedding_id),
+                "embedding_actual_backend": embedding_summary.get("retriever_vector_backend_actual", ""),
+            }
+            row.update({column: "" for column in RETRIEVAL_ANNOTATION_COLUMNS})
+            saved = existing.get((report_id, field_key), {})
+            row.update({column: saved.get(column, row[column]) for column in RETRIEVAL_ANNOTATION_COLUMNS})
+            rows.append(row)
+
+        report_rows.append({
+            "report_id": report_id,
+            "fields": len(field_keys),
+            "embedding_vs_simple_top1_changed": changed_top1,
+            "embedding_vs_local_top1_changed": changed_embedding_vs_local,
+            "embedding_vector_only_top1": vector_only,
+            "simple_chunks": simple_summary.get("chunks", ""),
+            "local_backend": local_summary.get("retriever_vector_backend_actual", local_summary.get("retriever_vector_backend", "")),
+            "embedding_backend": embedding_summary.get("retriever_vector_backend_actual", ""),
+            "embedding_model": embedding_summary.get("embedding_model", ""),
+        })
+
+    columns = [
+        "report_id", "field_key",
+        "simple_top1_chunk", "simple_top1_page", "simple_top1_score", "simple_top1_text",
+        "local_top1_chunk", "local_top1_page", "local_top1_score", "local_vector_rank", "local_top1_text",
+        "embedding_top1_chunk", "embedding_top1_page", "embedding_top1_score",
+        "embedding_bm25_rank", "embedding_vector_rank", "embedding_vector_score",
+        "embedding_vector_backend", "embedding_top1_text",
+        "simple_vs_embedding_changed", "local_vs_embedding_changed", "embedding_actual_backend",
+        *RETRIEVAL_ANNOTATION_COLUMNS,
+        "simple_dir", "local_hybrid_dir", "embedding_hybrid_dir",
+    ]
+    _write_csv(table_path, rows, columns)
+    summary = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "reports": report_rows,
+        "overall": {
+            "reports": len(report_rows),
+            "fields": len(rows),
+            "embedding_vs_simple_top1_changed": sum(int(row["simple_vs_embedding_changed"]) for row in rows),
+            "embedding_vs_local_top1_changed": sum(int(row["local_vs_embedding_changed"]) for row in rows),
+            "annotation_guide": {
+                "best_mode": "人工填写 simple/local/embedding/same。",
+                "simple_score": "人工填写 -1/0/1，表示 simple 的 Top1 证据相对是否差/相当/好。",
+                "local_hybrid_score": "人工填写 -1/0/1，表示 local hybrid 的 Top1 证据相对是否差/相当/好。",
+                "embedding_hybrid_score": "人工填写 -1/0/1，表示 embedding hybrid 的 Top1 证据相对是否差/相当/好。",
+                "retrieval_note": "记录判断原因，例如绩效表、目录页、治理制度页、员工发展页等。",
+            },
+        },
+    }
+    summary_path = output_dir / "retrieval_comparison_summary.json"
+    write_json(summary_path, summary)
+    return {"table": str(table_path), "summary": str(summary_path)}
 
 
 def _truthy(value: Any) -> bool | None:

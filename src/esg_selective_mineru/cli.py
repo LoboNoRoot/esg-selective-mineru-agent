@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from .config import load_settings
-from .evaluation import build_evaluation_pack, build_review_page
+from .evaluation import build_evaluation_pack, build_retrieval_evaluation_pack, build_review_page
 from .extractor import extract_report
 from .pipeline import run_pipeline, scan_only
 
@@ -36,6 +36,12 @@ def parse_args() -> argparse.Namespace:
     eval_cmd.add_argument("--run-dir", type=Path, action="append", required=True, help="repeat for each report run dir")
     eval_cmd.add_argument("--output", type=Path, required=True)
     eval_cmd.add_argument("--sample-size", type=int, default=10)
+
+    retrieval_eval_cmd = sub.add_parser("retrieval-eval", help="compare simple/local hybrid/embedding hybrid retrieval outputs")
+    retrieval_eval_cmd.add_argument("--simple-dir", type=Path, action="append", required=True, help="repeat in report order")
+    retrieval_eval_cmd.add_argument("--local-hybrid-dir", type=Path, action="append", required=True, help="repeat in report order")
+    retrieval_eval_cmd.add_argument("--embedding-hybrid-dir", type=Path, action="append", required=True, help="repeat in report order")
+    retrieval_eval_cmd.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
 
@@ -69,10 +75,19 @@ def main() -> None:
         elif args.command == "review":
             build_review_page(args.run_dir, args.output)
             print(f"review_page={args.output}")
-        else:
+        elif args.command == "eval":
             result = build_evaluation_pack(args.run_dir, args.output, sample_size=args.sample_size)
             print(f"evaluation_table={result['table']}")
             print(f"metrics_summary={result['summary']}")
+        else:
+            result = build_retrieval_evaluation_pack(
+                args.simple_dir,
+                args.local_hybrid_dir,
+                args.embedding_hybrid_dir,
+                args.output,
+            )
+            print(f"retrieval_evaluation_table={result['table']}")
+            print(f"retrieval_summary={result['summary']}")
 
 
 if __name__ == "__main__":

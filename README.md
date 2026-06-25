@@ -26,6 +26,13 @@ Copy-Item configs\.env.example .env
 - `LLM_MAX_CALLS_PER_REPORT`: 每份报告最大模型调用数，默认 12。
 - `LLM_FIELD_BATCH_SIZE`: 每次模型调用处理字段数，默认 6。
 - `RAG_TOP_K`: 每个字段召回的证据块数量，默认 3。
+- `RETRIEVER_MODE`: 召回模式，`simple` 使用原 BM25 召回，`hybrid` 启用 BM25 + 本地向量召回测试版，默认 `simple`。
+- `RETRIEVER_VECTOR_BACKEND`: hybrid 模式下的向量后端，`local` 使用无外部依赖原型，`embedding` 调用 OpenAI-compatible embeddings API，默认 `local`。
+- `EMBEDDING_MODEL`: embedding 后端模型名，默认 `text-embedding-v4`。
+- `EMBEDDING_BATCH_SIZE`: 文档 chunk embedding 批大小，默认 10。
+- `RAG_BM25_TOP_K`: hybrid 模式下 BM25 分支候选数量，默认 30。
+- `RAG_VECTOR_TOP_K`: hybrid 模式下本地向量分支候选数量，默认 30。
+- `RAG_RRF_K`: hybrid 模式下 RRF 融合参数，默认 60。
 - `SELECTIVE_MINERU_MAX_PAGES`: 重点页上限，默认 12。
 - `TARGET_REPORT_YEAR`: 当前抽取和质量校验的目标报告年度，默认 2024。现阶段只接受 2024 年数据；报告中出现的 2025 或历史年份会被标记为年份异常并提高复核优先级。
 - `MINERU_LLM_REVIEW_ENABLED`: 是否启用 MinerU 灰区页 LLM 复判，默认 false。
@@ -96,6 +103,41 @@ $env:PYTHONPATH='C:\Users\18130\PycharmProjects\爬虫\esg-selective-mineru-agen
 $env:PYTHONPATH='C:\Users\18130\PycharmProjects\爬虫\esg-selective-mineru-agent\src'
 & 'C:\Users\18130\.conda\envs\pachong\python.exe' -m esg_selective_mineru.cli extract '<PDF>' --output 'output\report_extract' --no-llm
 ```
+
+测试 BM25 + 向量混合召回：
+
+```powershell
+$env:PYTHONPATH='C:\Users\18130\PycharmProjects\爬虫\esg-selective-mineru-agent\src'
+$env:RETRIEVER_MODE='hybrid'
+& 'C:\Users\18130\.conda\envs\pachong\python.exe' -m esg_selective_mineru.cli extract '<PDF>' --output 'output\report_extract_hybrid' --no-llm
+```
+
+hybrid 测试版会在 `field_contexts.json` 中为候选块增加 `retrieval_source`、`bm25_rank`、`vector_rank`、`bm25_score`、`vector_score`、`hybrid_rank` 等字段，便于和原 `simple` 模式对比证据召回效果。当前向量分支是无外部依赖的本地字符 n-gram TF-IDF cosine 原型，用于低成本验证融合策略；后续可替换为真实 embedding/FAISS。
+
+使用真实 embedding 向量召回：
+
+```powershell
+$env:PYTHONPATH='C:\Users\18130\PycharmProjects\爬虫\esg-selective-mineru-agent\src'
+$env:RETRIEVER_MODE='hybrid'
+$env:RETRIEVER_VECTOR_BACKEND='embedding'
+$env:EMBEDDING_MODEL='text-embedding-v4'
+& 'C:\Users\18130\.conda\envs\pachong\python.exe' -m esg_selective_mineru.cli extract '<PDF>' --output 'output\report_extract_hybrid_embedding' --no-llm
+```
+
+embedding 模式会复用 `DASHSCOPE_API_KEY` 和 `OPENAI_BASE_URL`，会产生 embedding API 调用成本；如果缺少 key 或调用失败，会自动回退到本地向量原型，并在 `field_contexts.json` 中写入 `vector_backend: local_fallback` 和简短 `vector_error`。
+
+生成 simple / local hybrid / embedding hybrid 三方召回人工评估表：
+
+```powershell
+$env:PYTHONPATH='C:\Users\18130\PycharmProjects\爬虫\esg-selective-mineru-agent\src'
+& 'C:\Users\18130\.conda\envs\pachong\python.exe' -m esg_selective_mineru.cli retrieval-eval `
+  --simple-dir output\compare_retrieval\000537_simple `
+  --local-hybrid-dir output\compare_retrieval\000537_hybrid `
+  --embedding-hybrid-dir output\compare_retrieval\000537_embedding `
+  --output output\retrieval_evaluation
+```
+
+多份报告时重复传入三组目录，并保持 simple、local hybrid、embedding hybrid 的报告顺序一致。命令会生成 `retrieval_manual_comparison.csv` 和 `retrieval_comparison_summary.json`；人工在 CSV 中填写 `best_mode`、`simple_score`、`local_hybrid_score`、`embedding_hybrid_score` 和 `retrieval_note`。
 
 已有 MinerU 缓存时，只重跑抽取：
 

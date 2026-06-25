@@ -9,7 +9,7 @@ from .config import Settings
 from .io_utils import write_json
 from .llm_client import LLMClient
 from .quality import enrich_results
-from .retriever import SimpleRetriever
+from .retriever import HybridRetriever, SimpleRetriever
 from .schema_loader import load_a_share_schema, schema_summary
 
 
@@ -73,7 +73,20 @@ def extract_report(pdf_path: Path, output_dir: Path, settings: Settings, *, use_
     output_dir.mkdir(parents=True, exist_ok=True)
     write_json(output_dir / "rag_chunks.json", chunks)
 
-    retriever = SimpleRetriever(chunks)
+    if settings.retriever_mode == "hybrid":
+        retriever = HybridRetriever(
+            chunks,
+            bm25_top_k=settings.rag_bm25_top_k,
+            vector_top_k=settings.rag_vector_top_k,
+            rrf_k=settings.rag_rrf_k,
+            vector_backend=settings.retriever_vector_backend,
+            embedding_api_key=settings.dashscope_api_key,
+            embedding_base_url=settings.openai_base_url,
+            embedding_model=settings.embedding_model,
+            embedding_batch_size=settings.embedding_batch_size,
+        )
+    else:
+        retriever = SimpleRetriever(chunks)
     contexts: Dict[str, List[Dict[str, Any]]] = {}
     for field in fields:
         contexts[field["field_key"]] = retriever.search_field(field, top_k=settings.rag_top_k)
@@ -114,6 +127,10 @@ def extract_report(pdf_path: Path, output_dir: Path, settings: Settings, *, use_
         "target_year": settings.target_report_year,
         "schema": schema_summary(fields),
         "chunks": len(chunks),
+        "retriever_mode": settings.retriever_mode,
+        "retriever_vector_backend": settings.retriever_vector_backend,
+        "retriever_vector_backend_actual": getattr(retriever, "vector_backend", ""),
+        "embedding_model": settings.embedding_model if settings.retriever_vector_backend == "embedding" else "",
         "fields": len(fields),
         "matched": sum(1 for row in results if row.get("matched")),
         "weak_evidence": sum(1 for row in results if int(row.get("evidence_score") or 0) < 50),

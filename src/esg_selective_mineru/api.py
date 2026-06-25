@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from .config import Settings, load_settings
 from .extractor import extract_report
 from .io_utils import read_json, write_json
+from .job_store import JobStore
 from .pipeline import run_pipeline, scan_only
 from .quality import enrich_results, quality_summary
 from .report_filter import assess_report_suitability
@@ -71,6 +72,17 @@ class ReviewRecord(ReviewUpdate):
 
 
 settings = load_settings()
+
+
+def _database_path() -> Path:
+    url = settings.database_url
+    if url.startswith("sqlite:///"):
+        path = Path(url.removeprefix("sqlite:///"))
+        return path if path.is_absolute() else settings.project_root / path
+    return settings.project_root / "data" / "esg_jobs.db"
+
+
+job_store = JobStore(_database_path())
 app = FastAPI(
     title="ESG Selective MinerU API",
     version="0.1.0",
@@ -121,13 +133,74 @@ def _review_path(job_id: str) -> Path:
 def _write_job(job: Dict[str, Any]) -> None:
     job["updated_at"] = _now()
     write_json(_job_meta_path(job["job_id"]), job)
+    job_store.upsert_job(job)
+
+
+def _write_report_for_job(job: Dict[str, Any], filename: str = "") -> None:
+    now = job.get("created_at") or _now()
+    pdf_path = str(job.get("pdf_path") or "")
+    report_id = str(job.get("report_id") or job.get("file_sha256") or job["job_id"])
+    job["report_id"] = report_id
+    job_store.upsert_report({
+        "report_id": report_id,
+        "filename": filename or Path(pdf_path).name,
+        "file_sha256": job.get("file_sha256", ""),
+        "pdf_path": pdf_path,
+        "upload_bytes": job.get("upload_bytes", 0),
+        "created_at": now,
+        "updated_at": job.get("updated_at") or now,
+    })
+
+
+def _sync_job_artifacts(job: Dict[str, Any]) -> None:
+    job_id = str(job["job_id"])
+    output_dir = Path(str(job["output_dir"]))
+    artifact_specs = {
+        "job_meta": ("job.json", "application/json"),
+        "skip_report": ("skip_report.json", "application/json"),
+        "run_summary": ("run_summary.json", "application/json"),
+        "page_scan": ("page_scan.json", "application/json"),
+        "parse_plan": ("parse_plan.json", "application/json"),
+        "visual_fallback_queue": ("visual_fallback_queue.json", "application/json"),
+        "mineru_jobs": ("mineru_jobs.json", "application/json"),
+        "rag_chunks": ("rag_chunks.json", "application/json"),
+        "field_contexts": ("field_contexts.json", "application/json"),
+        "extraction_summary": ("extraction_summary.json", "application/json"),
+        "extraction_results_json": ("extraction_results.json", "application/json"),
+        "extraction_results_csv": ("extraction_results.csv", "text/csv"),
+        "reviewed_extraction_results_csv": ("reviewed_extraction_results.csv", "text/csv"),
+    }
+    for artifact_type, (filename, mime_type) in artifact_specs.items():
+        path = output_dir / filename
+        if path.exists():
+            job_store.add_artifact(job_id, artifact_type, str(path), mime_type, _now())
+
+
+def _sync_extraction_results(job: Dict[str, Any]) -> list[Dict[str, Any]]:
+    job_id = str(job["job_id"])
+    path = Path(str(job["output_dir"])) / "extraction_results.json"
+    if not path.exists():
+        return []
+    rows = read_json(path)
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=500, detail="invalid_results_format")
+    rows = enrich_results(rows, pdf_path=job.get("pdf_path", ""), target_year=settings.target_report_year)
+    job_store.upsert_extraction_results(job_id, rows, _now())
+    return rows
 
 
 def _read_job(job_id: str) -> Dict[str, Any]:
+    job = job_store.get_job(job_id)
+    if job is not None:
+        return job
     path = _job_meta_path(job_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail="job_not_found")
-    return read_json(path)
+    job = read_json(path)
+    if isinstance(job, dict):
+        _write_report_for_job(job)
+        job_store.upsert_job(job)
+    return job
 
 
 def _safe_pdf_name(filename: str) -> str:
@@ -138,23 +211,39 @@ def _safe_pdf_name(filename: str) -> str:
 
 
 def _read_reviews(job_id: str) -> Dict[str, Any]:
+    reviews = job_store.read_reviews(job_id)
+    if reviews:
+        return reviews
     path = _review_path(job_id)
     if not path.exists():
         return {}
     data = read_json(path)
+    if isinstance(data, dict):
+        for field_key, record in data.items():
+            if isinstance(record, dict):
+                job_store.write_review(job_id, str(field_key), {**record, "updated_at": record.get("updated_at") or _now()})
     return data if isinstance(data, dict) else {}
 
 
 def _write_reviews(job_id: str, reviews: Dict[str, Any]) -> None:
     write_json(_review_path(job_id), reviews)
+    for field_key, record in reviews.items():
+        if isinstance(record, dict):
+            job_store.write_review(job_id, str(field_key), record)
 
 
 def _list_jobs() -> list[Dict[str, Any]]:
+    stored_jobs = job_store.list_jobs()
+    if stored_jobs:
+        return stored_jobs
     root = _api_output_root(settings)
     jobs: list[Dict[str, Any]] = []
     for path in root.glob("*/job.json"):
         try:
-            jobs.append(read_json(path))
+            job = read_json(path)
+            if isinstance(job, dict):
+                job_store.upsert_job(job)
+                jobs.append(job)
         except Exception:
             continue
     return sorted(jobs, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
@@ -207,13 +296,11 @@ def _merge_review(row: Dict[str, Any], review: Dict[str, Any]) -> Dict[str, Any]
 
 def _load_result_rows(job_id: str) -> list[Dict[str, Any]]:
     job = _read_job(job_id)
-    path = Path(job["output_dir"]) / "extraction_results.json"
-    if not path.exists():
+    rows = job_store.read_extraction_results(job_id)
+    if not rows:
+        rows = _sync_extraction_results(job)
+    if not rows:
         raise HTTPException(status_code=404, detail="results_not_ready")
-    rows = read_json(path)
-    if not isinstance(rows, list):
-        raise HTTPException(status_code=500, detail="invalid_results_format")
-    rows = enrich_results(rows, pdf_path=job.get("pdf_path", ""), target_year=settings.target_report_year)
     reviews = _read_reviews(job_id)
     return [
         _merge_review(row, reviews.get(str(row.get("field_key") or ""), {"status": "pending"}))
@@ -330,6 +417,7 @@ async def _create_job_from_upload(
 
     job = {
         "job_id": job_id,
+        "report_id": file_sha256 or job_id,
         "status": "queued",
         "mode": mode,
         "pdf_path": str(pdf_path),
@@ -342,6 +430,7 @@ async def _create_job_from_upload(
         "upload_bytes": upload_bytes,
         "file_sha256": file_sha256,
     }
+    _write_report_for_job(job, filename)
     _write_job(job)
     background_tasks.add_task(_run_job, job_id)
     return CreateJobResponse(job_id=job_id, status="queued", mode=mode, output_dir=str(job_dir))
@@ -362,6 +451,7 @@ def _run_job(job_id: str) -> None:
             write_json(output_dir / "skip_report.json", job["summary"])
             write_json(output_dir / "run_summary.json", job["summary"])
             _write_job(job)
+            _sync_job_artifacts(job)
             return
         mode = job["mode"]
         if mode == "scan":
@@ -385,10 +475,12 @@ def _run_job(job_id: str) -> None:
             )
             job["summary"] = result.get("summary", {})
         job["status"] = "succeeded"
+        _sync_extraction_results(job)
     except Exception as exc:
         job["status"] = "failed"
         job["error"] = str(exc)
     _write_job(job)
+    _sync_job_artifacts(job)
 
 
 @app.get("/health")
@@ -469,6 +561,7 @@ def delete_job(job_id: str) -> Dict[str, Any]:
     job_dir = _job_dir(job_id)
     if job_dir.exists():
         shutil.rmtree(job_dir)
+    job_store.delete_job(job_id)
     return {"deleted": True, "job_id": job_id}
 
 
@@ -516,4 +609,11 @@ def get_job_summary(job_id: str) -> Any:
 def export_job_csv(job_id: str) -> FileResponse:
     rows = _load_result_rows(job_id)
     path = _write_reviewed_csv(job_id, rows)
+    job_store.add_artifact(job_id, "reviewed_extraction_results_csv", str(path), "text/csv", _now())
     return FileResponse(path, media_type="text/csv", filename=f"{job_id}_reviewed_extraction_results.csv")
+
+
+@app.get("/jobs/{job_id}/artifacts")
+def get_job_artifacts(job_id: str) -> Dict[str, Any]:
+    _read_job(job_id)
+    return {"artifacts": job_store.list_artifacts(job_id)}

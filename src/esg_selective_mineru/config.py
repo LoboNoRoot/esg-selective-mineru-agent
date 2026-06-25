@@ -31,8 +31,16 @@ class Settings:
     llm_extraction_enabled: bool
     llm_max_calls_per_report: int
     llm_field_batch_size: int
+    retriever_mode: str
+    retriever_vector_backend: str
+    embedding_model: str
+    embedding_batch_size: int
+    rag_bm25_top_k: int
+    rag_vector_top_k: int
+    rag_rrf_k: int
     rag_top_k: int
     target_report_year: str
+    database_url: str
 
 
 def _bool_env(name: str, default: str = "false") -> bool:
@@ -75,8 +83,16 @@ def load_settings(start: Path | None = None) -> Settings:
         llm_extraction_enabled=_bool_env("LLM_EXTRACTION_ENABLED", "true"),
         llm_max_calls_per_report=int(os.getenv("LLM_MAX_CALLS_PER_REPORT", "12")),
         llm_field_batch_size=int(os.getenv("LLM_FIELD_BATCH_SIZE", "6")),
+        retriever_mode=os.getenv("RETRIEVER_MODE", "simple").strip().lower(),
+        retriever_vector_backend=os.getenv("RETRIEVER_VECTOR_BACKEND", "local").strip().lower(),
+        embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-v4").strip(),
+        embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "10")),
+        rag_bm25_top_k=int(os.getenv("RAG_BM25_TOP_K", "30")),
+        rag_vector_top_k=int(os.getenv("RAG_VECTOR_TOP_K", "30")),
+        rag_rrf_k=int(os.getenv("RAG_RRF_K", "60")),
         rag_top_k=int(os.getenv("RAG_TOP_K", "3")),
         target_report_year=os.getenv("TARGET_REPORT_YEAR", "2024").strip(),
+        database_url=os.getenv("DATABASE_URL", "sqlite:///data/esg_jobs.db").strip(),
     )
 
 

@@ -8,7 +8,6 @@ services:
       - .env
     environment:
       PYTHONPATH: /app/src
-      MINERU_AUTO_RUN_ENABLED: "false"
       MINERU_OUTPUT_ROOT: /app/output/mineru_cache
     volumes:
       - ./data:/app/data
