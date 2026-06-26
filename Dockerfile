@@ -15,6 +15,9 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app/src
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ENV PIP_TRUSTED_HOST=mirrors.aliyun.com
+ENV PIP_DEFAULT_TIMEOUT=120
 
 COPY pyproject.toml README.md /app/
 COPY src /app/src
